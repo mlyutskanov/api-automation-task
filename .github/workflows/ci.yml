@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  checks: write
+  pull-requests: write
+
+jobs:
+  test:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Start LibraryManager API
+        shell: pwsh
+        run: |
+          $process = Start-Process `
+            -FilePath "${{ github.workspace }}\LibraryManager.exe" `
+            -PassThru
+          $process.Id | Out-File "${{ github.workspace }}\api.pid"
+          Write-Host "Started LibraryManager.exe with PID $($process.Id)"
+          Start-Sleep -Seconds 3
+          if ($process.HasExited) {
+            Write-Error "LibraryManager.exe exited with code $($process.ExitCode)"
+            exit 1
+          }
+          Write-Host "Process still running after 3s"
+
+      - name: Wait for API to be ready
+        shell: pwsh
+        run: |
+          $maxAttempts = 30
+          for ($i = 1; $i -le $maxAttempts; $i++) {
+            try {
+              Invoke-WebRequest -Uri "http://localhost:9000/api/books" -TimeoutSec 2 -ErrorAction Stop | Out-Null
+              Write-Host "API is ready (attempt $i)"
+              exit 0
+            } catch {
+              Write-Host "Attempt $i/$maxAttempts - not ready yet, retrying in 1s..."
+              Start-Sleep -Seconds 1
+            }
+          }
+          Write-Error "API did not become ready within $maxAttempts seconds"
+          exit 1
+
+      - name: Run tests
+        continue-on-error: true
+        run: dotnet test LibraryManagerTests/LibraryManagerTests/LibraryManagerTests.csproj --logger "trx;LogFileName=results.trx"
+
+      - name: Publish test results
+        uses: dorny/test-reporter@v1
+        if: always()
+        with:
+          name: NUnit Test Results
+          path: '**/TestResults/results.trx'
+          reporter: dotnet-trx
+          fail-on-error: false
+
+      - name: Upload TRX artifact
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-results
+          path: '**/TestResults/results.trx'
